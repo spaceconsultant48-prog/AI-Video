@@ -11,7 +11,7 @@ import threading
 import time
 
 from app.db import SessionLocal
-from app.models import Video, VideoScene, GenerationJob
+from app.models import Video, VideoScene, GenerationJob, VideoFile
 from app.core import settings
 from app.providers import ReplicateProvider
 
@@ -99,6 +99,7 @@ def run_ffmpeg(args, timeout=900):
     return result
 
 
+MAX_STORED_MB = 60       # biggest video kept in the database (free Neon DB is 0.5 GB)
 MAX_XFADE_INPUTS = 4    # FFmpeg opens every input at once; joining in small groups keeps memory low
 
 
@@ -726,6 +727,16 @@ def _process(video_id):
             raise RuntimeError("Generation finished without creating a valid MP4 file.")
 
         video.output_path = output
+        # Keep a copy in the database so the download still works after the host restarts.
+        try:
+            size = output_file.stat().st_size
+            if size <= MAX_STORED_MB * 1024 * 1024:
+                db.query(VideoFile).filter_by(video_id=video.id).delete()
+                db.add(VideoFile(video_id=video.id, data=output_file.read_bytes(), size=size))
+            else:
+                logger.warning("Video %s is %.0f MB; too large to store in the database", video.id, size / 1048576)
+        except Exception:
+            logger.exception("Could not store video %s in the database", video.id)
         video.status = "completed"
         job.status = "completed"
         job.provider = {
