@@ -56,12 +56,19 @@ def ensure_output_dir():
 
 
 NICE_BIN = shutil.which("nice") if os.name == "posix" else None
+# Keep FFmpeg to ONE thread by default: on a 2-CPU host it would otherwise take every core,
+# the web server could not answer polls/health checks, and the host answered 502.
+FFMPEG_THREADS = str(max(1, int(os.environ.get("FFMPEG_THREADS", "1") or 1)))
 
 
 def run_ffmpeg(args, timeout=900):
     """Run FFmpeg and include its stderr in errors so jobs do not fail silently."""
     # Lowest CPU priority: the web server must keep answering requests (and health checks)
     # while FFmpeg renders, otherwise a small host restarts the app mid-render (502).
+    args = list(args)
+    # global filter threads right after the binary, encoder threads just before the output file
+    args[1:1] = ["-filter_threads", FFMPEG_THREADS, "-filter_complex_threads", FFMPEG_THREADS]
+    args[-1:-1] = ["-threads", FFMPEG_THREADS]
     if NICE_BIN:
         args = [NICE_BIN, "-n", "19", *args]
     try:
@@ -273,6 +280,40 @@ def resolve_effect(name, index):
     return name
 
 
+def motion_size(effect, width, height):
+    """Size the still image must have before the motion filter runs."""
+    if effect == "none":
+        return width, height
+    return int(width * OVERSAMPLE) // 2 * 2, int(height * OVERSAMPLE) // 2 * 2
+
+
+def prepare_image(src, size, dest):
+    """
+    Shrink + crop the photo to the exact working size ONCE.
+    FFmpeg's `-loop 1` re-decodes the image for every frame, so a 12-megapixel phone photo
+    made each scene very slow and pinned the CPU. A small pre-sized JPEG removes that cost.
+    Also applies the photo's EXIF rotation.
+    """
+    from PIL import Image, ImageOps
+    target_w, target_h = size
+    with Image.open(src) as img:
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            background = Image.new("RGB", img.size, (0, 0, 0))
+            rgba = img.convert("RGBA")
+            background.paste(rgba, mask=rgba.split()[-1])
+            img = background
+        else:
+            img = img.convert("RGB")
+        scale = max(target_w / img.width, target_h / img.height)
+        new_w, new_h = max(target_w, round(img.width * scale)), max(target_h, round(img.height * scale))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        left, top = (new_w - target_w) // 2, (new_h - target_h) // 2
+        img = img.crop((left, top, left + target_w, top + target_h))
+        img.save(dest, "JPEG", quality=95, subsampling=0)
+    return dest
+
+
 def motion_filter(effect, width, height, duration):
     """FFmpeg filter for one still image: scale/crop, then zoom in / zoom out / pan."""
     frames = max(2, int(round(duration * FPS)))
@@ -397,6 +438,7 @@ def make_slideshow(scenes, durations, video, output_path, effects=None, transiti
     width, height = output_dimensions(video.resolution, video.aspect_ratio)
     output_dir = ensure_output_dir()
     clips = []
+    temp_images = []
     effects = effects or []
     lengths = clip_lengths(durations, transition_seconds if transition != "none" else 0.0)
 
@@ -412,9 +454,12 @@ def make_slideshow(scenes, durations, video, output_path, effects=None, transiti
             clip = output_dir / f"scene-{video.id}-{scene.position}.mp4"
             effect = resolve_effect(effects[index] if index < len(effects) else "auto", index)
             vf = motion_filter(effect, width, height, duration)
+            prepared = output_dir / f"scene-{video.id}-{scene.position}.jpg"
+            temp_images.append(prepared)
+            prepare_image(image_path, motion_size(effect, width, height), prepared)
             run_ffmpeg([
                 settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-                "-loop", "1", "-i", str(image_path),
+                "-loop", "1", "-i", str(prepared),
                 "-t", f"{duration:.3f}", "-vf", vf,
                 "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                 "-r", str(FPS), "-pix_fmt", "yuv420p", str(clip),
@@ -428,6 +473,8 @@ def make_slideshow(scenes, durations, video, output_path, effects=None, transiti
     finally:
         for clip in clips:
             Path(clip).unlink(missing_ok=True)
+        for image in temp_images:
+            image.unlink(missing_ok=True)
 
 
 def make_ai_motion(scenes, durations, video, output_path, transition="none", transition_seconds=0.0):
@@ -635,9 +682,11 @@ def _process(video_id):
                 seconds = max(seconds, audio_seconds + TAIL_SECONDS)
             effect = resolve_effect(read_video_config(video).get("effect", "zoom_in"), 0)
             vf = motion_filter(effect, width, height, seconds)
+            prepared_marketing = output_dir / f"marketing-{video.id}.jpg"
+            prepare_image(video.image_path, motion_size(effect, width, height), prepared_marketing)
             run_ffmpeg([
                 settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-                "-loop", "1", "-i", video.image_path,
+                "-loop", "1", "-i", str(prepared_marketing),
                 "-t", f"{seconds:.3f}", "-vf", vf,
                 "-an", "-r", str(FPS), "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 silent_output,
@@ -707,6 +756,7 @@ def _process(video_id):
 
     finally:
         _progress = None
+        Path(settings.output_dir, f"marketing-{video_id}.jpg").unlink(missing_ok=True)
         if audio_path:
             Path(audio_path).unlink(missing_ok=True)
         db.close()
