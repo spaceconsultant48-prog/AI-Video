@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ import subprocess
 
 from app.core import settings
 from app.db import Base, engine, get_db
-from app.models import User, UploadedImage, Video, VideoScene, GenerationJob
+from app.models import User, UploadedImage, Video, VideoScene, GenerationJob, VideoFile
 from app.security import hash_password, verify_password, token, current_user, admin_user
 from app.worker import process, EFFECTS, TRANSITIONS
 
@@ -198,7 +198,21 @@ async def upload(file: UploadFile = File(...), user=Depends(current_user), db: S
     return {"id": item.id, "filename": item.filename}
 
 
-def serial(video: Video, db: Session | None = None):
+def stored_ids(db: Session, video_ids):
+    """Ids of videos whose MP4 is saved in the database (does not load the video bytes)."""
+    if not video_ids:
+        return set()
+    return {row[0] for row in db.query(VideoFile.video_id).filter(VideoFile.video_id.in_(list(video_ids))).all()}
+
+
+def file_available(video: Video, stored: set):
+    return bool(video.output_path and Path(video.output_path).exists()) or video.id in stored
+
+
+def serial(video: Video, db: Session | None = None, stored: set | None = None):
+    if stored is None:
+        stored = stored_ids(db, [video.id]) if db is not None else set()
+    available = video.status == "completed" and file_available(video, stored)
     result = {
         "id": video.id,
         "title": video.title,
@@ -210,7 +224,8 @@ def serial(video: Video, db: Session | None = None):
         "aspect_ratio": video.aspect_ratio,
         "error": video.error,
         "created_at": video.created_at.isoformat(),
-        "download_url": f"/api/videos/{video.id}/download" if video.output_path and video.status == "completed" else None,
+        "download_url": f"/api/videos/{video.id}/download" if available else None,
+        "file_expired": video.status == "completed" and not available,
     }
     if db is not None:
         scenes = db.query(VideoScene).filter_by(video_id=video.id).order_by(VideoScene.position).all()
@@ -361,7 +376,8 @@ async def create_multi_image_video(
 @app.get("/api/videos/history")
 def history(user=Depends(current_user), db: Session = Depends(get_db)):
     videos = db.query(Video).filter_by(user_id=user.id).order_by(Video.created_at.desc()).limit(100).all()
-    return [serial(video, db) for video in videos]
+    stored = stored_ids(db, [v.id for v in videos])
+    return [serial(video, db, stored) for video in videos]
 
 
 @app.get("/api/videos/{vid}")
@@ -375,9 +391,17 @@ def get_video(vid: int, user=Depends(current_user), db: Session = Depends(get_db
 @app.get("/api/videos/{vid}/download")
 def download(vid: int, user=Depends(current_user), db: Session = Depends(get_db)):
     video = db.query(Video).filter_by(id=vid, user_id=user.id).first()
-    if not video or not video.output_path or not Path(video.output_path).exists():
-        raise HTTPException(404, "Video file unavailable")
-    return FileResponse(video.output_path, media_type="video/mp4", filename=f"space-consultant-{vid}.mp4")
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if video.output_path and Path(video.output_path).exists():
+        return FileResponse(video.output_path, media_type="video/mp4", filename=f"space-consultant-{vid}.mp4")
+    stored = db.query(VideoFile).filter_by(video_id=vid).first()
+    if not stored:
+        raise HTTPException(404, "This video file expired when the server restarted. Please generate it again.")
+    return Response(
+        stored.data, media_type="video/mp4",
+        headers={"Content-Disposition": f'attachment; filename="space-consultant-{vid}.mp4"'},
+    )
 
 
 @app.delete("/api/videos/{vid}")
@@ -391,6 +415,7 @@ def delete_video(vid: int, user=Depends(current_user), db: Session = Depends(get
         if path:
             Path(path).unlink(missing_ok=True)
     db.query(VideoScene).filter_by(video_id=vid).delete()
+    db.query(VideoFile).filter_by(video_id=vid).delete()
     db.query(GenerationJob).filter_by(video_id=vid).delete()
     db.delete(video)
     db.commit()
