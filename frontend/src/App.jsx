@@ -23,8 +23,10 @@ async function downloadVideo(url, filename = 'space-consultant-video.mp4') {
   } catch (error) {
     if (error.response?.status === 401) {
       alert('Your session has expired. Please sign in again.');
+    } else if (error.response?.status === 404) {
+      alert('This video file is no longer on the server (it was removed when the server restarted). Please generate the video again.');
     } else {
-      alert(error.response?.data?.detail || 'Video download failed. Please try again.');
+      alert('Video download failed. Please try again.');
     }
   }
 }
@@ -299,7 +301,7 @@ function Create() {
 }
 
 function VideoList({ videos, onDelete }) {
-  return videos.length ? <div className="list">{videos.map(video => <div className="item" key={video.id}><Film /><div><b>{video.title || 'Video ' + video.id}</b><small>{video.mode} · {video.scene_count ? `${video.scene_count} scenes · ` : ''}{video.duration}s · {video.resolution}</small>{video.status === 'completed' && video.error && <small style={{ display: 'block', color: '#f59e0b' }}>⚠ {video.error}</small>}</div><span className={'badge ' + video.status}>{video.status}</span>{video.download_url && <button type="button" aria-label={`Download video ${video.id}`} onClick={() => downloadVideo(video.download_url, `video-${video.id}.mp4`)}><Download /></button>}{onDelete && <button onClick={() => onDelete(video.id)}><Trash2 /></button>}</div>)}</div> : <div className="empty">No videos yet. Create your first video.</div>;
+  return videos.length ? <div className="list">{videos.map(video => <div className="item" key={video.id}><Film /><div><b>{video.title || 'Video ' + video.id}</b><small>{video.mode} · {video.scene_count ? `${video.scene_count} scenes · ` : ''}{video.duration}s · {video.resolution}</small>{video.file_expired && <small style={{ display: 'block', color: '#f87171' }}>File expired after a server restart - please generate it again.</small>}{video.status === 'completed' && video.error && <small style={{ display: 'block', color: '#f59e0b' }}>⚠ {video.error}</small>}</div><span className={'badge ' + video.status}>{video.status}</span>{video.download_url && <button type="button" aria-label={`Download video ${video.id}`} onClick={() => downloadVideo(video.download_url, `video-${video.id}.mp4`)}><Download /></button>}{onDelete && <button onClick={() => onDelete(video.id)}><Trash2 /></button>}</div>)}</div> : <div className="empty">No videos yet. Create your first video.</div>;
 }
 
 function History() {
