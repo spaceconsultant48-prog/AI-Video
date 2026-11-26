@@ -1,12 +1,17 @@
 services:
   - type: web
-    name: space-consultant-ai-studio
-    runtime: docker
+    name: space-consultant-ai-studio-api
+    runtime: python
     plan: free
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL          # Neon Postgres connection string
+        sync: false
+      - key: CORS_ORIGINS          # your Netlify URL, no trailing slash
         sync: false
