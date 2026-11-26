@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Text, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 
@@ -61,3 +61,12 @@ class GenerationJob(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending")
     provider: Mapped[str] = mapped_column(String(80), default="")
     error: Mapped[str] = mapped_column(Text, default="")
+
+
+class VideoFile(Base):
+    """Finished MP4 kept in the database, because the host's disk is wiped on every restart/sleep."""
+    __tablename__ = "video_files"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), unique=True, index=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    size: Mapped[int] = mapped_column(Integer, default=0)
