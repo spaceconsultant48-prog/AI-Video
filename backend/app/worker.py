@@ -3,7 +3,9 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -53,8 +55,15 @@ def ensure_output_dir():
     return output_dir
 
 
+NICE_BIN = shutil.which("nice") if os.name == "posix" else None
+
+
 def run_ffmpeg(args, timeout=900):
     """Run FFmpeg and include its stderr in errors so jobs do not fail silently."""
+    # Lowest CPU priority: the web server must keep answering requests (and health checks)
+    # while FFmpeg renders, otherwise a small host restarts the app mid-render (502).
+    if NICE_BIN:
+        args = [NICE_BIN, "-n", "19", *args]
     try:
         result = subprocess.run(
             args,
