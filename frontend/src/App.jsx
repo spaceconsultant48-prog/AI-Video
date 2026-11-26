@@ -133,6 +133,7 @@ function Create() {
   const [resolution, setResolution] = useState('720p');
   const [ratio, setRatio] = useState('9:16');
   const [job, setJob] = useState(null);
+  const [pollIssue, setPollIssue] = useState(false);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [voiceList, setVoiceList] = useState([]);
@@ -150,7 +151,9 @@ function Create() {
 
   useEffect(() => {
     if (!job?.id || ['completed', 'failed'].includes(job.status)) return;
-    const timer = setInterval(() => api.get('/api/videos/' + job.id).then(r => setJob(r.data)).catch(() => {}), 3500);
+    const timer = setInterval(() => api.get('/api/videos/' + job.id)
+      .then(r => { setPollIssue(false); setJob(r.data); })
+      .catch(() => setPollIssue(true)), 3500);
     return () => clearInterval(timer);
   }, [job?.id, job?.status]);
 
@@ -291,7 +294,7 @@ function Create() {
       <div className="row"><label>Motion effect<select value={effect} onChange={e => setEffect(e.target.value)}>{effectOptions.filter(([value]) => value !== 'auto').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>Duration<select value={duration} onChange={e => setDuration(Number(e.target.value))}>{[5, 10, 15, 30, 60].map(value => <option key={value}>{value}</option>)}</select></label><label>Quality<select value={resolution} onChange={e => setResolution(e.target.value)}><option>720p</option><option>1080p</option></select></label><label>Ratio<select value={ratio} onChange={e => setRatio(e.target.value)}><option>9:16</option><option>1:1</option><option>16:9</option></select></label></div>
       {message && <p className="notice">{message}</p>}<button className="primary" disabled={busy}>{busy ? <LoaderCircle /> : <Sparkles />}{busy ? 'Submitting...' : 'Generate video'}</button>
     </form>}
-    {job && <div className="job result-job"><b>Job #{job.id}</b><span className={'badge ' + job.status}>{job.status}</span>{['pending', 'processing'].includes(job.status) && job.stage && <p className="notice">Working: {job.stage}...</p>}{job.error && <p className={job.status === 'completed' ? 'notice' : 'error'}>{job.status === 'completed' ? 'Voice note: ' : ''}{job.error}</p>}{job.download_url && <button type="button" className="primary" onClick={() => downloadVideo(job.download_url, `video-${job.id}.mp4`)}><Download /> Download MP4</button>}</div>}
+    {job && <div className="job result-job"><b>Job #{job.id}</b><span className={'badge ' + job.status}>{job.status}</span>{['pending', 'processing'].includes(job.status) && job.stage && <p className="notice">Working: {job.stage}...</p>}{pollIssue && ['pending', 'processing'].includes(job.status) && <p className="notice">Server is busy or restarting (502). Still trying to reconnect - please keep this page open.</p>}{job.error && <p className={job.status === 'completed' ? 'notice' : 'error'}>{job.status === 'completed' ? 'Voice note: ' : ''}{job.error}</p>}{job.download_url && <button type="button" className="primary" onClick={() => downloadVideo(job.download_url, `video-${job.id}.mp4`)}><Download /> Download MP4</button>}</div>}
   </section>;
 }
 
