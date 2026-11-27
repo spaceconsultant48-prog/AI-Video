@@ -370,24 +370,49 @@ async def _tts_save(text, voice_id, audio_path):
     await edge_tts.Communicate(text, voice_id).save(str(audio_path))
 
 
-def synthesize_speech(text, voice_id, audio_path):
-    """Generate the narration MP3, retrying because Edge TTS fails now and then."""
+def _gtts_save(text, voice_id, audio_path):
+    """Backup voice (Google TTS). Used when Microsoft's Edge TTS refuses the request."""
+    from gtts import gTTS
+    if voice_id.startswith("hi-"):
+        lang, tld = "hi", "co.in"
+    elif "-IN-" in voice_id:
+        lang, tld = "en", "co.in"
+    elif "-GB-" in voice_id:
+        lang, tld = "en", "co.uk"
+    else:
+        lang, tld = "en", "com"
+    gTTS(text=text, lang=lang, tld=tld).save(str(audio_path))
+
+
+def synthesize_speech(text, voice_id, audio_path, attempts=TTS_ATTEMPTS):
+    """
+    Generate the narration MP3. Edge TTS first (retrying, it fails now and then); if it keeps
+    failing (common on cloud hosts), fall back to Google TTS. Returns "edge" or "gtts".
+    """
     audio_path = Path(audio_path)
     last_error = None
-    for attempt in range(1, TTS_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             # BackgroundTasks runs this sync worker in a thread, so asyncio.run is safe.
             asyncio.run(asyncio.wait_for(_tts_save(text, voice_id, audio_path), timeout=90))
             if audio_path.exists() and audio_path.stat().st_size > 0:
-                return
+                return "edge"
             raise RuntimeError("TTS provider returned an empty audio file.")
         except Exception as exc:
             last_error = exc
             audio_path.unlink(missing_ok=True)
-            logger.warning("TTS attempt %s/%s failed: %s", attempt, TTS_ATTEMPTS, exc)
-            if attempt < TTS_ATTEMPTS:
+            logger.warning("Edge TTS attempt %s/%s failed: %s", attempt, attempts, exc)
+            if attempt < attempts:
                 time.sleep(2 * attempt)
-    raise RuntimeError(f"AI voice failed after {TTS_ATTEMPTS} attempts: {last_error}")
+    try:
+        _gtts_save(text, voice_id, audio_path)
+        if audio_path.exists() and audio_path.stat().st_size > 0:
+            logger.warning("Used backup voice (Google TTS) because Edge TTS failed: %s", last_error)
+            return "gtts"
+        raise RuntimeError("Backup voice returned an empty audio file.")
+    except Exception as backup_error:
+        audio_path.unlink(missing_ok=True)
+        raise RuntimeError(f"AI voice failed. Edge TTS: {last_error} | Backup voice: {backup_error}")
 
 
 def prepare_narration(video):
@@ -406,7 +431,10 @@ def prepare_narration(video):
     report('Generating AI voice')
     audio_path = ensure_output_dir() / f"voice-{video.id}.mp3"
     try:
-        synthesize_speech(text, voice_id, audio_path)
+        provider = synthesize_speech(text, voice_id, audio_path)
+        if provider == "gtts":
+            backup = "The main AI voice was unavailable, so a backup voice was used."
+            note = f"{note} {backup}" if note else backup
         seconds = media_duration(audio_path)
         if seconds <= 0:
             raise RuntimeError("Generated narration has zero length.")
