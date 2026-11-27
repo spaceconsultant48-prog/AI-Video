@@ -99,6 +99,7 @@ def run_ffmpeg(args, timeout=900):
     return result
 
 
+MAX_VOICE_VIDEO_SECONDS = 300   # longest uploaded video that can get an AI voice
 MAX_STORED_MB = 60       # biggest video kept in the database (free Neon DB is 0.5 GB)
 MAX_XFADE_INPUTS = 4    # FFmpeg opens every input at once; joining in small groups keeps memory low
 
@@ -435,6 +436,53 @@ def fit_durations(durations, audio_seconds):
     return [math.ceil(d * scale * FPS) / FPS for d in base]
 
 
+def has_audio_stream(path):
+    result = subprocess.run(
+        [settings.ffmpeg_bin, "-hide_banner", "-i", str(path)],
+        check=False, capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace",
+    )
+    return bool(re.search(r"Stream #\S+.*Audio:", result.stderr or ""))
+
+
+def add_voice_to_video(video_path, audio_path, audio_seconds, config, output):
+    """
+    Put an AI narration on an uploaded video.
+    - narration longer than the video  -> the last frame is held so the whole script is spoken
+    - narration shorter than the video -> the rest of the video stays (silent or original sound)
+    - audio_mode 'replace' drops the original sound, 'mix' keeps it quietly under the voice
+    """
+    report("Adding AI voice to your video")
+    video_seconds = media_duration(video_path)
+    if video_seconds > MAX_VOICE_VIDEO_SECONDS:
+        raise RuntimeError(f"Video is too long ({video_seconds:.0f}s). Maximum is {MAX_VOICE_VIDEO_SECONDS} seconds.")
+    total = max(video_seconds, audio_seconds + TAIL_SECONDS)
+    extra = total - video_seconds
+
+    vf = "scale=w='trunc(if(gt(iw,ih),min(1280,iw),min(720,iw))/2)*2':h=-2,format=yuv420p"
+    if extra > 0.05:
+        vf += f",tpad=stop_mode=clone:stop_duration={extra:.3f}"
+
+    mode = str(config.get("audio_mode") or "replace")
+    try:
+        volume = min(1.0, max(0.0, float(config.get("original_volume", 0.25))))
+    except (TypeError, ValueError):
+        volume = 0.25
+    if mode == "mix" and has_audio_stream(video_path):
+        af = (f"[0:a]volume={volume:.2f}[orig];[1:a]apad[voice];"
+              "[orig][voice]amix=inputs=2:duration=longest:normalize=0[a]")
+    else:
+        af = "[1:a]apad[a]"
+
+    run_ffmpeg([
+        settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path), "-i", str(audio_path),
+        "-filter_complex", f"[0:v]{vf}[v];{af}",
+        "-map", "[v]", "-map", "[a]", "-t", f"{total:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
+    ], timeout=max(900, int(total) * 20))
+
+
 def make_slideshow(scenes, durations, video, output_path, effects=None, transition="none", transition_seconds=0.0):
     width, height = output_dimensions(video.resolution, video.aspect_ratio)
     output_dir = ensure_output_dir()
@@ -697,6 +745,17 @@ def _process(video_id):
             if warning:
                 notes.append(warning)
 
+        elif video.mode == "video_voice":
+            audio_path, audio_seconds, note = prepare_narration(video)
+            if not audio_path:
+                raise RuntimeError(note or "Write the narration text for the AI voice.")
+            if note:
+                notes.append(note)
+            if not Path(video.image_path).exists():
+                raise RuntimeError("The uploaded video is no longer on the server (it restarted). Please upload it again.")
+            add_voice_to_video(video.image_path, audio_path, audio_seconds, read_video_config(video), output)
+            job.provider = "ffmpeg-voice"
+
         elif video.mode == "image_to_video":
             ReplicateProvider(settings.replicate_image_video_version).generate(
                 video.image_path, video.prompt, silent_output
@@ -741,7 +800,7 @@ def _process(video_id):
         job.status = "completed"
         job.provider = {
             "multi_image_slideshow": "ffmpeg-slideshow", "multi_image_ai": "replicate-multi-scene",
-            "marketing": "ffmpeg", "image_to_video": "replicate",
+            "marketing": "ffmpeg", "image_to_video": "replicate", "video_voice": "ffmpeg-voice",
         }.get(video.mode, job.provider)
         db.commit()
         logger.info("Video %s completed: %s", video_id, output)
@@ -768,6 +827,8 @@ def _process(video_id):
     finally:
         _progress = None
         Path(settings.output_dir, f"marketing-{video_id}.jpg").unlink(missing_ok=True)
+        if video is not None and video.mode == "video_voice" and video.image_path:
+            Path(video.image_path).unlink(missing_ok=True)   # source upload is not needed after rendering
         if audio_path:
             Path(audio_path).unlink(missing_ok=True)
         db.close()
