@@ -503,8 +503,9 @@ async def voice_preview(x: Preview, user=Depends(current_user)):
         raise HTTPException(400, "Unsupported voice selection")
     out = str(Path(settings.output_dir) / (uuid4().hex + ".mp3"))
     try:
-        import edge_tts
-        await edge_tts.Communicate(x.text, x.voice_id).save(out)
+        from starlette.concurrency import run_in_threadpool
+        from app.worker import synthesize_speech
+        await run_in_threadpool(synthesize_speech, x.text, x.voice_id, out, 1)
         if not Path(out).exists() or Path(out).stat().st_size == 0:
             raise RuntimeError("Voice provider returned an empty audio file")
     except Exception as exc:
