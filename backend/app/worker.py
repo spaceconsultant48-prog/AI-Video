@@ -19,6 +19,7 @@ logger = logging.getLogger("space_consultant.worker")
 
 FPS = 25
 DEFAULT_VOICE = "en-IN-NeerjaNeural"
+LEAD_SECONDS = 0.8      # silence before the first word: players swallow the first moments of audio
 TAIL_SECONDS = 0.8      # small silent tail after the last spoken word
 TTS_ATTEMPTS = 3        # Edge TTS sometimes fails once and works on retry
 OVERSAMPLE = 1.5        # zoom smoothness vs CPU: 2.0 = smoother but slower
@@ -415,6 +416,26 @@ def synthesize_speech(text, voice_id, audio_path, attempts=TTS_ATTEMPTS):
         raise RuntimeError(f"AI voice failed. Edge TTS: {last_error} | Backup voice: {backup_error}")
 
 
+def add_lead_in(audio_path):
+    """Put LEAD_SECONDS of silence before the voice so the first word is not clipped on playback."""
+    audio_path = Path(audio_path)
+    padded = audio_path.with_name(audio_path.stem + "-lead.wav")
+    try:
+        run_ffmpeg([
+            settings.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(audio_path),
+            "-af", f"adelay={int(LEAD_SECONDS * 1000)}:all=1",
+            "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(padded),
+        ], timeout=300)
+        if padded.exists() and padded.stat().st_size > 0:
+            audio_path.unlink(missing_ok=True)
+            return padded
+    except Exception:
+        logger.exception("Could not add lead-in silence; using the narration as it is")
+    padded.unlink(missing_ok=True)
+    return audio_path
+
+
 def prepare_narration(video):
     """
     Create the narration BEFORE the video is built so the video can be timed to it.
@@ -435,6 +456,7 @@ def prepare_narration(video):
         if provider == "gtts":
             backup = "The main AI voice was unavailable, so a backup voice was used."
             note = f"{note} {backup}" if note else backup
+        audio_path = add_lead_in(audio_path)
         seconds = media_duration(audio_path)
         if seconds <= 0:
             raise RuntimeError("Generated narration has zero length.")
