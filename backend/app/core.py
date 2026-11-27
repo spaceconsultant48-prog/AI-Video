@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     upload_dir:str="uploads"
     output_dir:str="generated"
     max_upload_mb:int=15
+    max_video_upload_mb:int=100
     replicate_api_token:str=""
     replicate_image_video_version:str=""
     replicate_talking_avatar_version:str=""
