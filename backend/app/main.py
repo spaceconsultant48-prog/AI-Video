@@ -373,6 +373,76 @@ async def create_multi_image_video(
     return serial(video, db)
 
 
+VIDEO_TYPES = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm", "video/x-matroska": ".mkv", "video/x-m4v": ".m4v"}
+
+
+@app.post("/api/videos/add-voice")
+async def add_voice(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    voiceover_text: str = Form(...),
+    voice_id: str = Form("en-IN-NeerjaNeural"),
+    audio_mode: str = Form("replace"),
+    title: str = Form("Video with AI voice"),
+    user=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from starlette.concurrency import run_in_threadpool
+    from app.worker import media_duration, MAX_VOICE_VIDEO_SECONDS
+
+    text = voiceover_text.strip()
+    if not text:
+        raise HTTPException(400, "Write the narration text for the AI voice")
+    if len(text) > 10000:
+        raise HTTPException(400, "Voiceover text cannot exceed 10,000 characters")
+    if voice_id not in {v["id"] for v in VOICE_CATALOG}:
+        raise HTTPException(400, "Select a supported AI voice")
+    if audio_mode not in ("replace", "mix"):
+        raise HTTPException(400, "audio_mode must be replace or mix")
+    suffix = VIDEO_TYPES.get(file.content_type or "") or Path(file.filename or "").suffix.lower()
+    if suffix not in set(VIDEO_TYPES.values()):
+        raise HTTPException(415, "Upload an MP4, MOV, WEBM or MKV video")
+
+    path = Path(settings.upload_dir) / (uuid4().hex + suffix)
+    limit = settings.max_video_upload_mb * 1024 * 1024
+    size = 0
+    try:
+        with path.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, f"Video exceeds {settings.max_video_upload_mb} MB limit")
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "Empty video file")
+        try:
+            seconds = await run_in_threadpool(media_duration, path)
+        except Exception:
+            raise HTTPException(400, "This file is not a readable video")
+        if seconds > MAX_VOICE_VIDEO_SECONDS:
+            raise HTTPException(400, f"Video is {seconds:.0f}s long. Maximum is {MAX_VOICE_VIDEO_SECONDS} seconds.")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+    item = UploadedImage(user_id=user.id, filename=file.filename or path.name, path=str(path), content_type=file.content_type or "video/mp4")
+    db.add(item)
+    db.flush()
+    video = Video(
+        user_id=user.id, image_id=item.id, title=(title or "Video with AI voice")[:255], mode="video_voice",
+        prompt=f"Uploaded video + AI voice ({audio_mode})",
+        script=json.dumps({"voiceover_text": text, "voice_id": voice_id, "audio_mode": audio_mode, "original_volume": 0.25}),
+        image_path=str(path), duration=max(1, round(seconds)), resolution="source", aspect_ratio="source",
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+    db.add(GenerationJob(video_id=video.id))
+    db.commit()
+    background_tasks.add_task(process, video.id)
+    return serial(video, db)
+
+
 @app.get("/api/videos/history")
 def history(user=Depends(current_user), db: Session = Depends(get_db)):
     videos = db.query(Video).filter_by(user_id=user.id).order_by(Video.created_at.desc()).limit(100).all()
