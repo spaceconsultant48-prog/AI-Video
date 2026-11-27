@@ -3,7 +3,7 @@ import { NavLink, Routes, Route, useNavigate } from 'react-router-dom';
 import {
   Sparkles, LayoutDashboard, WandSparkles, Folder, Mic, LogOut,
   Upload, Download, Trash2, Film, Image as ImageIcon, LoaderCircle,
-  ArrowUp, ArrowDown, X, Images, Clapperboard, Volume2
+  ArrowUp, ArrowDown, X, Images, Clapperboard, Volume2, Video
 } from 'lucide-react';
 import api from './api';
 
@@ -136,6 +136,8 @@ function Create() {
   const [ratio, setRatio] = useState('9:16');
   const [job, setJob] = useState(null);
   const [pollIssue, setPollIssue] = useState(false);
+  const [videoFile, setVideoFile] = useState(null);
+  const [audioMode, setAudioMode] = useState('replace');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [voiceList, setVoiceList] = useState([]);
@@ -200,8 +202,8 @@ function Create() {
         mode,
         image_id: uploaded.id,
         prompt,
-        script: mode === 'image_to_video' ? '' : script,
-        voiceover_text: mode === 'image_to_video' ? '' : script,
+        script,
+        voiceover_text: script,
         voice_id: voiceId,
         effect,
         duration,
@@ -234,14 +236,56 @@ function Create() {
     finally { setBusy(false); }
   }
 
+  async function previewVoice() {
+    setVoicePreviewBusy(true); setMessage('');
+    try {
+      const response = await api.post('/api/voices/preview', { text: voiceoverText, voice_id: voiceId }, { responseType: 'blob' });
+      const url = URL.createObjectURL(response.data); const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url); audio.onerror = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch (err) { setMessage('Voice preview failed. Please try again.'); }
+    finally { setVoicePreviewBusy(false); }
+  }
+
+  async function submitVideoVoice(event) {
+    event.preventDefault(); setBusy(true); setMessage(''); setJob(null);
+    try {
+      if (!videoFile) throw new Error('Choose a video first');
+      if (!voiceoverText.trim()) throw new Error('Write the narration text for the AI voice');
+      const form = new FormData();
+      form.append('file', videoFile, videoFile.name);
+      form.append('voiceover_text', voiceoverText);
+      form.append('voice_id', voiceId);
+      form.append('audio_mode', audioMode);
+      form.append('title', 'Video with AI voice');
+      const result = (await api.post('/api/videos/add-voice', form)).data;
+      setJob(result); setMessage('Video uploaded. The AI voice is being added.');
+    } catch (err) { setMessage(err.response?.data?.detail || err.message || 'Upload failed'); }
+    finally { setBusy(false); }
+  }
+
   return <section>
-    <h1>Create video</h1><p>Build a video from one image or a multi-scene storyboard.</p>
+    <h1>Create video</h1><p>Build a video from images, or add an AI voice to your own video.</p>
     <div className="workflow-tabs">
       <button type="button" className={workflow === 'multi' ? 'tab active' : 'tab'} onClick={() => { setWorkflow('multi'); setJob(null); setMessage(''); }}><Images /> Multiple images (2–20)</button>
       <button type="button" className={workflow === 'single' ? 'tab active' : 'tab'} onClick={() => { setWorkflow('single'); setJob(null); setMessage(''); }}><ImageIcon /> Single image</button>
+      <button type="button" className={workflow === 'video' ? 'tab active' : 'tab'} onClick={() => { setWorkflow('video'); setJob(null); setMessage(''); }}><Video /> Video + AI voice</button>
     </div>
 
-    {workflow === 'multi' ? <form className="builder" onSubmit={submitMulti}>
+    {workflow === 'video' ? <form className="builder" onSubmit={submitVideoVoice}>
+      <h3>1. Upload your video</h3>
+      <label className="upload"><Upload /> Choose MP4, MOV or WEBM (max 100 MB, up to 5 minutes)<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.webm,.mkv" onChange={e => { setVideoFile(e.target.files?.[0] || null); setJob(null); }} /></label>
+      {videoFile && <p className="scene-summary">Selected: {videoFile.name} ({(videoFile.size / 1048576).toFixed(1)} MB)</p>}
+      <h3>2. AI voice</h3>
+      <label>Choose AI voice<select value={voiceId} onChange={e => setVoiceId(e.target.value)}>{voiceList.map(voice => <option key={voice.id} value={voice.id}>{voice.name} — {voice.language} · {voice.gender}</option>)}</select></label>
+      <label>Narration script<textarea placeholder="Write what the AI voice should say over your video..." value={voiceoverText} onChange={e => setVoiceoverText(e.target.value)} /></label>
+      <button type="button" className="secondary" disabled={voicePreviewBusy || !voiceoverText.trim()} onClick={previewVoice}><Volume2 size={16} />{voicePreviewBusy ? 'Preparing voice...' : 'Preview selected voice'}</button>
+      <h3>3. Original sound</h3>
+      <label>What should happen to the video's own audio?<select value={audioMode} onChange={e => setAudioMode(e.target.value)}><option value="replace">Replace it with the AI voice</option><option value="mix">Keep it quietly under the AI voice</option></select></label>
+      <p className="scene-summary">If the narration is longer than the video, the last frame is held until the voice finishes. If it is shorter, the rest of the video continues.</p>
+      {message && <p className="notice">{message}</p>}
+      <button className="primary" disabled={busy || !videoFile}>{busy ? <LoaderCircle /> : <Sparkles />}{busy ? 'Uploading...' : 'Add AI voice to video'}</button>
+    </form> : workflow === 'multi' ? <form className="builder" onSubmit={submitMulti}>
       <h3>1. Add images to your storyboard</h3>
       <label className="upload"><Upload /> Select 2–20 JPG, PNG or WEBP images<input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={addFiles} /></label>
       <div className="scene-summary">{scenes.length} / 20 images added · Drag-free ordering with the up/down controls</div>
@@ -289,8 +333,8 @@ function Create() {
       <h3>2. Upload image</h3><label className="upload"><Upload /> Choose JPG, PNG or WEBP<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e => { const file = e.target.files?.[0]; setSingleFile(file || null); setSinglePreview(file ? URL.createObjectURL(file) : ''); }} /></label>
       {singlePreview && <img className="preview" src={singlePreview} alt="Uploaded preview" />}
       <h3>3. Prompt / script</h3><textarea placeholder="Describe the animation or marketing brief..." value={prompt} onChange={e => setPrompt(e.target.value)} />
-      {mode !== 'image_to_video' && <>
-        <label>Voiceover / avatar script<textarea placeholder="Write the exact words the AI voice should speak..." value={script} onChange={e => setScript(e.target.value)} /></label>
+      {<>
+        <label>Voiceover / narration script (optional)<textarea placeholder="Write the exact words the AI voice should speak..." value={script} onChange={e => setScript(e.target.value)} /></label>
         <label>Choose AI voice<select value={voiceId} onChange={e => setVoiceId(e.target.value)}>{voiceList.map(voice => <option key={voice.id} value={voice.id}>{voice.name} — {voice.language} · {voice.gender}</option>)}</select></label>
       </>}
       <div className="row"><label>Motion effect<select value={effect} onChange={e => setEffect(e.target.value)}>{effectOptions.filter(([value]) => value !== 'auto').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>Duration<select value={duration} onChange={e => setDuration(Number(e.target.value))}>{[5, 10, 15, 30, 60].map(value => <option key={value}>{value}</option>)}</select></label><label>Quality<select value={resolution} onChange={e => setResolution(e.target.value)}><option>720p</option><option>1080p</option></select></label><label>Ratio<select value={ratio} onChange={e => setRatio(e.target.value)}><option>9:16</option><option>1:1</option><option>16:9</option></select></label></div>
@@ -301,7 +345,7 @@ function Create() {
 }
 
 function VideoList({ videos, onDelete }) {
-  return videos.length ? <div className="list">{videos.map(video => <div className="item" key={video.id}><Film /><div><b>{video.title || 'Video ' + video.id}</b><small>{video.mode} · {video.scene_count ? `${video.scene_count} scenes · ` : ''}{video.duration}s · {video.resolution}</small>{video.file_expired && <small style={{ display: 'block', color: '#f87171' }}>File expired after a server restart - please generate it again.</small>}{video.status === 'completed' && video.error && <small style={{ display: 'block', color: '#f59e0b' }}>⚠ {video.error}</small>}</div><span className={'badge ' + video.status}>{video.status}</span>{video.download_url && <button type="button" aria-label={`Download video ${video.id}`} onClick={() => downloadVideo(video.download_url, `video-${video.id}.mp4`)}><Download /></button>}{onDelete && <button onClick={() => onDelete(video.id)}><Trash2 /></button>}</div>)}</div> : <div className="empty">No videos yet. Create your first video.</div>;
+  return videos.length ? <div className="list">{videos.map(video => <div className="item" key={video.id}><Film /><div><b>{video.title || 'Video ' + video.id}</b><small>{video.mode} · {video.scene_count ? `${video.scene_count} scenes · ` : ''}{video.duration}s{video.resolution && video.resolution !== 'source' ? ` · ${video.resolution}` : ''}</small>{video.file_expired && <small style={{ display: 'block', color: '#f87171' }}>File expired after a server restart - please generate it again.</small>}{video.status === 'completed' && video.error && <small style={{ display: 'block', color: '#f59e0b' }}>⚠ {video.error}</small>}</div><span className={'badge ' + video.status}>{video.status}</span>{video.download_url && <button type="button" aria-label={`Download video ${video.id}`} onClick={() => downloadVideo(video.download_url, `video-${video.id}.mp4`)}><Download /></button>}{onDelete && <button onClick={() => onDelete(video.id)}><Trash2 /></button>}</div>)}</div> : <div className="empty">No videos yet. Create your first video.</div>;
 }
 
 function History() {
